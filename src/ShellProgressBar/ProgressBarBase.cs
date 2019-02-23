@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 
@@ -16,6 +17,9 @@ namespace ShellProgressBar
 		private int _maxTicks;
 		private int _currentTick;
 		private string _message;
+		public List<double> LastProgress = new List<double>();
+		public DateTime? LastTime { get; internal set; }
+		public long LastTicks { get; internal set; }
 
 		protected ProgressBarBase(int maxTicks, string message, ProgressBarOptions options)
 		{
@@ -109,7 +113,7 @@ namespace ShellProgressBar
 				this.EndTime = DateTime.Now;
 				this.OnDone();
 			}
-			DisplayProgress();
+			//DisplayProgress();
 		}
 	}
 }

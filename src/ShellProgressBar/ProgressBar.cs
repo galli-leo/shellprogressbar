@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -40,7 +41,7 @@ namespace ShellProgressBar
 				TaskbarProgress.SetState(TaskbarProgress.TaskbarStates.Normal);
 
 			if (this.Options.DisplayTimeInRealTime)
-				_timer = new Timer((s) => OnTimerTick(), null, 500, 500);
+				_timer = new Timer((s) => OnTimerTick(), null, 100, 100);
 			else //draw once
 				_timer = new Timer((s) =>
 				{
@@ -99,16 +100,45 @@ namespace ShellProgressBar
 			public readonly bool LastChild;
 		}
 
-		private static void ProgressBarBottomHalf(double percentage, DateTime startDate, DateTime? endDate, string message,
+		private static (double, DateTime) CalculateRate(double percentage, long maxTicks, long currentTicks, DateTime startDate, DateTime current, long lastTicks,
+			DateTime? lastUpdate, List<double> lastRates)
+		{
+			var elapsed = (current - startDate).Ticks;
+			var rate = ((double) currentTicks * TimeSpan.TicksPerSecond) / elapsed;
+			if (lastUpdate.HasValue)
+			{
+				var dProgress = currentTicks - lastTicks;
+				var dElapsed = (current - lastUpdate).Value.Ticks;
+				var lastRate = ((double) dProgress * TimeSpan.TicksPerSecond) / dElapsed;
+				if (lastRates.Count > 10)
+				{
+					lastRates.RemoveAt(0);
+					lastRates.Add(lastRate);
+				}
+
+				lastRate = lastRates.Count > 0 ? lastRates.Average() : lastRate;
+				var smooth = 0.15;
+				rate = smooth * lastRate + (1 - smooth) * rate;
+			}
+
+			var eta = current + TimeSpan.FromSeconds((maxTicks - currentTicks) / rate);
+
+			return (rate, eta);
+		}
+
+		private static void ProgressBarBottomHalf(double percentage, long currentTicks, long maxTicks, double rate, DateTime etaDate, DateTime startDate, DateTime? endDate, string message,
 			Indentation[] indentation, bool progressBarOnBottom)
 		{
 			var depth = indentation.Length;
 			var maxCharacterWidth = Console.WindowWidth - (depth * 2) + 2;
 			var duration = ((endDate ?? DateTime.Now) - startDate);
 			var durationString = $"{duration.Hours:00}:{duration.Minutes:00}:{duration.Seconds:00}";
+			var eta = (etaDate - DateTime.Now);
+			var etaString = $"{eta.Hours:00}:{eta.Minutes:00}:{eta.Seconds:00}";
+			var timeString = $"{durationString}->{etaString}";
 
-			var column1Width = Console.WindowWidth - durationString.Length - (depth * 2) + 2;
-			var column2Width = durationString.Length;
+			var column1Width = Console.WindowWidth - timeString.Length - (depth * 2) + 2;
+			var column2Width = timeString.Length;
 
 			if (progressBarOnBottom)
 				DrawTopHalfPrefix(indentation, depth);
@@ -117,8 +147,8 @@ namespace ShellProgressBar
 
 			var format = $"{{0, -{column1Width}}}{{1,{column2Width}}}";
 
-			var truncatedMessage = StringExtensions.Excerpt($"{percentage:N2}%" + " " + message, column1Width);
-			var formatted = string.Format(format, truncatedMessage, durationString);
+			var truncatedMessage = StringExtensions.Excerpt($"[{rate:F1}it/s] {currentTicks}/{maxTicks} {percentage:N2}%" + " " + message, column1Width);
+			var formatted = string.Format(format, truncatedMessage, timeString);
 			var m = formatted + new string(' ', Math.Max(0, maxCharacterWidth - formatted.Length));
 			Console.Write(m);
 		}
@@ -206,9 +236,15 @@ namespace ShellProgressBar
 				);
 			}
 
+			var current = DateTime.Now;
+			var currentTicks = this.CurrentTick;
+			var maxTicks = this.MaxTicks;
+			var (rate, eta) = CalculateRate(mainPercentage, this.MaxTicks, currentTicks, this._startDate, current, this.LastTicks, this.LastTime, this.LastProgress);
+
+
 			if (this.Options.ProgressBarOnBottom)
 			{
-				ProgressBarBottomHalf(mainPercentage, this._startDate, null, this.Message, indentation, this.Options.ProgressBarOnBottom);
+				ProgressBarBottomHalf(mainPercentage, currentTicks, maxTicks, rate, eta, this._startDate, null, this.Message, indentation, this.Options.ProgressBarOnBottom);
 				Console.SetCursorPosition(0, ++cursorTop);
 				TopHalf();
 			}
@@ -216,7 +252,7 @@ namespace ShellProgressBar
 			{
 				TopHalf();
 				Console.SetCursorPosition(0, ++cursorTop);
-				ProgressBarBottomHalf(mainPercentage, this._startDate, null, this.Message, indentation, this.Options.ProgressBarOnBottom);
+				ProgressBarBottomHalf(mainPercentage, currentTicks, maxTicks, rate, eta, this._startDate, null, this.Message, indentation, this.Options.ProgressBarOnBottom);
 			}
 
 			if (this.Options.EnableTaskBarProgress)
@@ -225,6 +261,9 @@ namespace ShellProgressBar
 			DrawChildren(this.Children, indentation, ref cursorTop);
 
 			ResetToBottom(ref cursorTop);
+
+			this.LastTime = current;
+			this.LastTicks = currentTicks;
 
 			Console.SetCursorPosition(0, _originalCursorTop);
 			Console.ForegroundColor = _originalColor;
@@ -278,9 +317,14 @@ namespace ShellProgressBar
 
 				Console.SetCursorPosition(0, ++cursorTop);
 
+				var current = DateTime.Now;
+				var currentTicks = child.CurrentTick;
+				var maxTicks = child.MaxTicks;
+				var (rate, eta) = CalculateRate(percentage, maxTicks, currentTicks, child.StartDate, current, child.LastTicks, child.LastTime, child.LastProgress);
+
 				if (child.Options.ProgressBarOnBottom)
 				{
-					ProgressBarBottomHalf(percentage, child.StartDate, child.EndTime, child.Message, childIndentation, child.Options.ProgressBarOnBottom);
+					ProgressBarBottomHalf(percentage, currentTicks, maxTicks, rate, eta, child.StartDate, child.EndTime, child.Message, childIndentation, child.Options.ProgressBarOnBottom);
 					Console.SetCursorPosition(0, ++cursorTop);
 					TopHalf();
 				}
@@ -288,8 +332,11 @@ namespace ShellProgressBar
 				{
 					TopHalf();
 					Console.SetCursorPosition(0, ++cursorTop);
-					ProgressBarBottomHalf(percentage, child.StartDate, child.EndTime, child.Message, childIndentation, child.Options.ProgressBarOnBottom);
+					ProgressBarBottomHalf(percentage, currentTicks, maxTicks, rate, eta, child.StartDate, child.EndTime, child.Message, childIndentation, child.Options.ProgressBarOnBottom);
 				}
+
+				child.LastTime = current;
+				child.LastTicks = currentTicks;
 
 				DrawChildren(child.Children, childIndentation, ref cursorTop);
 			}
